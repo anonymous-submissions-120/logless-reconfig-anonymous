@@ -13,11 +13,9 @@ VARIABLE state
 VARIABLE log
 VARIABLE config
 
-\* History variables for stating correctness properties.
-VARIABLE elections
 VARIABLE committed
 
-vars == <<currentTerm, state, log, elections, committed, config>>
+vars == <<currentTerm, state, log, committed, config>>
 
 \*
 \* Helper operators.
@@ -39,16 +37,17 @@ LogTerm(i, index) == GetTerm(log[i], index)
 Quorums(S) == {i \in SUBSET(S) : Cardinality(i) * 2 > Cardinality(S)}
 QuorumsAt(i) == Quorums(config[i])
 
-\* Is it possible for log 'i' to roll back against log 'j'. 
-\* If this is true, it implies that log 'i' should remove entries from the end of its log.
+IsPrefix(s, t) ==
+  (**************************************************************************)
+  (* TRUE iff the sequence s is a prefix of the sequence t, s.t.            *)
+  (* \E u \in Seq(Range(t)) : t = s \o u. In other words, there exists      *)
+  (* a suffix u that with s prepended equals t.                             *)
+  (**************************************************************************)
+  Len(s) <= Len(t) /\ SubSeq(s, 1, Len(s)) = SubSeq(t, 1, Len(s))
+
 CanRollback(i, j) ==
-    /\ Len(log[i]) > 0
-    /\ \* The log with later term is more up-to-date.
-       LastTerm(log[i]) < LastTerm(log[j])
-    /\ \/ Len(log[i]) > Len(log[j])
-       \* There seems no short-cut of OR clauses, so we specify the negative case.
-       \/ /\ Len(log[i]) <= Len(log[j])
-          /\ LastTerm(log[i]) /= LogTerm(j, Len(log[i]))
+    /\ LastTerm(log[i]) < LastTerm(log[j])
+    /\ ~IsPrefix(log[i],log[j])
 
 \* Can node 'i' currently cast a vote for node 'j' in term 'term'.
 CanVoteForOplog(i, j, term) ==
@@ -85,7 +84,7 @@ UpdateTermsExpr(i, j) ==
 ClientRequest(i) ==
     /\ state[i] = Primary
     /\ log' = [log EXCEPT ![i] = Append(log[i], currentTerm[i])]
-    /\ UNCHANGED <<currentTerm, state, elections, committed, config>>
+    /\ UNCHANGED <<currentTerm, state, committed, config>>
 
 \* Node 'i' gets a new log entry from node 'j'.
 GetEntries(i, j) ==
@@ -105,14 +104,14 @@ GetEntries(i, j) ==
               newEntry      == log[j][newEntryIndex]
               newLog        == Append(log[i], newEntry) IN
               /\ log' = [log EXCEPT ![i] = newLog]
-    /\ UNCHANGED <<elections, committed, currentTerm, state, config>>
+    /\ UNCHANGED <<committed, currentTerm, state, config>>
 
 \*  Node 'i' rolls back against the log of node 'j'.  
 RollbackEntries(i, j) ==
     /\ CanRollback(i, j)
     \* Roll back one log entry.
     /\ log' = [log EXCEPT ![i] = SubSeq(log[i], 1, Len(log[i])-1)]
-    /\ UNCHANGED <<elections, committed, currentTerm, state, config>>
+    /\ UNCHANGED <<committed, currentTerm, state, config>>
 
 \* Node 'i' gets elected as a primary.
 BecomeLeader(i, voteQuorum) == 
@@ -126,13 +125,7 @@ BecomeLeader(i, voteQuorum) ==
                     IF s = i THEN Primary
                     ELSE IF s \in voteQuorum THEN Secondary \* All voters should revert to secondary state.
                     ELSE state[s]]
-    /\ elections' = elections \cup 
-        {[ leader  |-> i, 
-            term   |-> newTerm ]}
-    \* Allow new leaders to write a no-op on step up if they want to. It is optional, but permissible.
-    /\ \/ log' = [log EXCEPT ![i] = Append(log[i], newTerm)]
-       \/ UNCHANGED log
-    /\ UNCHANGED <<config, committed>>   
+    /\ UNCHANGED <<log, config, committed>>   
             
 \* Primary 'i' commits its latest log entry.
 CommitEntry(i, commitQuorum) ==
@@ -150,7 +143,7 @@ CommitEntry(i, commitQuorum) ==
     /\ committed' = committed \cup
             {[ entry  |-> <<ind, currentTerm[i]>>,
                term  |-> currentTerm[i]]}
-    /\ UNCHANGED <<currentTerm, state, log, config, elections>>
+    /\ UNCHANGED <<currentTerm, state, log, config>>
 
 \* Action that exchanges terms between two nodes and step down the primary if
 \* needed. This can be safely specified as a separate action, rather than
@@ -159,7 +152,7 @@ CommitEntry(i, commitQuorum) ==
 \* strictly necessary for guaranteeing safety.
 UpdateTerms(i, j) == 
     /\ UpdateTermsExpr(i, j)
-    /\ UNCHANGED <<log, config, elections, committed>>
+    /\ UNCHANGED <<log, config, committed>>
 
 Init == 
     /\ currentTerm = [i \in Server |-> 0]
@@ -168,7 +161,6 @@ Init ==
     /\ \E initConfig \in SUBSET Server : 
         /\ initConfig # {} \* configs should be non-empty.
         /\ config = [i \in Server |-> initConfig]
-    /\ elections = {}
     /\ committed = {}
 
 Next == 
@@ -187,9 +179,11 @@ Spec == Init /\ [][Next]_vars
 \* Correctness properties
 \*
 
-ElectionSafety == 
-    \A e1, e2 \in elections : 
-        (e1.term = e2.term) => (e1.leader = e2.leader)
+OnePrimaryPerTerm == 
+    \A s,t \in Server :
+        (/\ state[s] = Primary 
+         /\ state[t] = Primary
+         /\ currentTerm[s] = currentTerm[t]) => (s = t)
 
 LeaderAppendOnly == 
     [][\A s \in Server : state[s] = Primary => Len(log'[s]) >= Len(log[s])]_vars
